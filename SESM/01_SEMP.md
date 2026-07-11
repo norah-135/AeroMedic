@@ -1,4 +1,4 @@
-## 🏗️ 1. Systems Engineering Management Plan (SEMP)
+##  1. Systems Engineering Management Plan (SEMP)
 This plan serves as the governing constitution for the AeroMedic project. It establishes the technical strategy to manage the multi-disciplinary integration of hardware, embedded firmware, and cloud platforms as a sole engineer, ensuring system reliability and safety-critical execution.
  
 ### 1.1 Technical Project Control & Tools
