@@ -1,0 +1,1 @@
+This section defines the detailed technical requirements for each subsystem within the AeroMedic system. The requirements are structured following established systems engineering practices, with software-related requirements aligned to the IEEE 830-1998 standard and the ISO/IEC 25010 quality model where applicable.
