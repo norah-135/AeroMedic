@@ -1,4 +1,4 @@
-## 🔄 2. Concept of Operations (ConOps)
+##  2. Concept of Operations (ConOps)
 This section outlines the operational framework, stakeholder roles, and deployment lifecycle of the AeroMedic system. It defines how the system functions in real-world environments from initial onboarding to emergency execution.
 
 ### 2.1 Operational Stakeholders & User Roles
