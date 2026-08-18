@@ -11,7 +11,7 @@ The subsystem eliminates onboard battery overhead by drawing power directly from
 * **Umbilical Tether:** 7-Meter Kevlar-Reinforced Hybrid Umbilical Cable (Power Lines + RS-485 Data Bus)
 * **Locking Mechanism:** Electric Solenoid Lock (App / Wristband / Doctor Override) + Manual Emergency Pull-Handle
 * **Thermal Containment Zone:** Fiberglass Thermal Insulation Chamber (Chemical Oxygen Candle Isolation)
-* **Human-Machine Interface (HMI):** 1.3-inch OLED Display (i2c), High-Output 85dB Waterproof Speaker, Recessed MEMS Microphone with Gore-Tex Acoustic Vent
+* **Human-Machine Interface (HMI):** 2.8" Sunlight-Readable IPS Display (SPI), 85dB Waterproof Speaker, Recessed MEMS Microphone with Gore-Tex Acoustic Vent.
 * **Medical Payload:** Auto-Injectable EpiPen, Pulse Chemical Oxygen Generator (Electronic Ignition Module)
 
 ---
