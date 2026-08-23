@@ -206,7 +206,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             boxShadow: connected
                                 ? [
                                     BoxShadow(
-                                      color: const Color(0xFFEF4444).withOpacity(0.4),
+                                      color: const Color(0xFFEF4444).withValues(alpha: 0.4),
                                       blurRadius: 25,
                                       spreadRadius: 8,
                                     )
