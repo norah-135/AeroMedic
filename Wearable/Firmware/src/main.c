@@ -6,9 +6,11 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "driver/i2c.h"
 #include "driver/gpio.h"
 #include "esp_sleep.h"
+
+// تضمين محرك كشف السقوط المدمج به Edge Impulse
+#include "fall_detector.h"
 
 // NimBLE
 #include "nimble/nimble_port.h"
@@ -19,13 +21,9 @@
 #include "pin_config.h"
 
 #define AEROMEDIC_DEVICE_ID 0x00A1
-#define MPU_ADDR            0x68
-#define I2C_PORT            I2C_NUM_0
-
 #define FLAG_FALL_DETECTED   (1 << 0)
 
-// ألوان مخصصة للمراقبة عبر الطرفية
-// تعريفات ANSI القياسية الصريحة
+// تعريف ألوان المراقبة
 #define C_RESET   "\x1B[0m"
 #define C_GRAY    "\x1B[90m"
 #define C_YELLOW  "\x1B[33m"
@@ -56,7 +54,7 @@ static aeromedic_payload_t current_payload = {
 };
 
 // ================================================================
-// بث الـ BLE في الخلفية بصمت تام
+// بث الـ BLE
 // ================================================================
 void update_ble_payload(const aeromedic_payload_t *payload) {
     struct ble_hs_adv_fields fields;
@@ -84,181 +82,48 @@ void start_ble_advertising(void) {
 void on_ble_sync(void) { start_ble_advertising(); }
 void nimble_host_task(void *param) { nimble_port_run(); nimble_port_freertos_deinit(); }
 
-// ================================================================
-// دوال قراءة وكتابة المسجلات المطابقة لـ Wire
-// ================================================================
-static void writeRegister(uint8_t reg, uint8_t data) {
-    uint8_t buf[2] = {reg, data};
-    i2c_master_write_to_device(I2C_PORT, MPU_ADDR, buf, 2, pdMS_TO_TICKS(100));
-}
-
-static uint8_t readRegister(uint8_t reg) {
-    uint8_t val = 0;
-    i2c_master_write_read_device(I2C_PORT, MPU_ADDR, &reg, 1, &val, 1, pdMS_TO_TICKS(100));
-    return val;
-}
-
-static void configureMPU6050_WOM(void) {
-    writeRegister(0x6B, 0x80); vTaskDelay(pdMS_TO_TICKS(100));
-    writeRegister(0x6B, 0x00); vTaskDelay(pdMS_TO_TICKS(10));
-    writeRegister(0x1C, 0x11);
-    writeRegister(0x1F, 10);   // حساسية حركة أعلى للاستيقاظ (~0.31g)
-    writeRegister(0x20, 2);
-    writeRegister(0x37, 0x20);
-    writeRegister(0x38, 0x40);
-    writeRegister(0x6C, 0x47);
-    writeRegister(0x6B, 0x20);
-    readRegister(0x3A);
-}
-
-static void wakeGyro(void) {
-    writeRegister(0x6B, 0x00);
-    writeRegister(0x6C, 0x00);
-    vTaskDelay(pdMS_TO_TICKS(40));
-}
-
-static void putGyroToSleepWOM(void) {
-    writeRegister(0x6C, 0x47);
-    writeRegister(0x6B, 0x20);
-    readRegister(0x3A);
-}
-
-static bool readSensorsDetailed(float *ax, float *ay, float *az, float *totalA, float *totalG) {
-    uint8_t reg = 0x3B;
-    uint8_t data[14];
-    if (i2c_master_write_read_device(I2C_PORT, MPU_ADDR, &reg, 1, data, 14, pdMS_TO_TICKS(100)) != ESP_OK) {
-        return false;
-    }
-
-    int16_t raw_ax = (data[0] << 8) | data[1];
-    int16_t raw_ay = (data[2] << 8) | data[3];
-    int16_t raw_az = (data[4] << 8) | data[5];
-    int16_t raw_gx = (data[8] << 8) | data[9];
-    int16_t raw_gy = (data[10] << 8) | data[11];
-    int16_t raw_gz = (data[12] << 8) | data[13];
-
-    *ax = (float)raw_ax / 4096.0f;
-    *ay = (float)raw_ay / 4096.0f;
-    *az = (float)raw_az / 4096.0f;
-    *totalA = sqrtf((*ax) * (*ax) + (*ay) * (*ay) + (*az) * (*az));
-
-    float gx_dps = (float)raw_gx / 65.5f;
-    float gy_dps = (float)raw_gy / 65.5f;
-    float gz_dps = (float)raw_gz / 65.5f;
-    *totalG = sqrtf(gx_dps * gx_dps + gy_dps * gy_dps + gz_dps * gz_dps);
-
-    if (isnan(*totalA)) *totalA = 1.0f;
-    if (isnan(*totalG)) *totalG = 0.0f;
-    return true;
-}
-
 static void IRAM_ATTR motion_isr(void* arg) {
     motionDetected = true;
 }
 
-// دالة محاكاة millis() الدقيقة
-static inline uint32_t get_millis(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000ULL);
-}
-
 // ================================================================
-// منطق كشف السقوط المطابق لكودك الأصلي تماماً
+// مهمة كشف السقوط باستخدام محرك Edge Impulse
 // ================================================================
 void fall_detection_task(void *param) {
+    fall_metrics_t metrics;
+
     while (1) {
         if (!motionDetected) {
             printf(C_GRAY "[SLEEP] ESP32 in Light Sleep. Monitoring motion...\n" C_RESET);
             fflush(stdout);
+            
+            // التأكد من تهيئة وضع سكون الحساس قبل نوم المعالج
+            fall_detector_arm_sleep();
             esp_light_sleep_start();
         }
 
         if (motionDetected) {
             motionDetected = false;
-            readRegister(0x3A);
 
-            printf(C_YELLOW "\n[EVENT] Motion Trigger -> Waking Gyroscope...\n" C_RESET);
+            printf(C_YELLOW "\n[EVENT] Motion Trigger -> Invoking Edge Impulse Engine...\n" C_RESET);
             fflush(stdout);
-            wakeGyro();
 
-            float ax, ay, az, totalA, totalG;
-            float pre_ax = 0, pre_ay = 0, pre_az = 0;
-            float peakImpact = 0.0f;
-            float weightedGyro = 0.0f;
-            float totalWeight = 0.0f;
-            const float weights[5] = {2.5f, 2.2f, 1.8f, 1.4f, 1.0f};
+            // استدعاء التحليل الهجين واستدلال الذكاء الاصطناعي
+            bool is_fall = fall_detector_run_analysis(&metrics);
 
-            // 1. فحص الدوران المبكر
-            for (int i = 0; i < 5; i++) {
-                if (readSensorsDetailed(&ax, &ay, &az, &totalA, &totalG)) {
-                    if (i == 0) { pre_ax = ax; pre_ay = ay; pre_az = az; }
-                    weightedGyro += (totalG * weights[i]);
-                    totalWeight += weights[i];
-                    if (totalA > peakImpact) peakImpact = totalA;
-                }
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            float normGyro = (totalWeight > 0.0f) ? (weightedGyro / totalWeight) : 0.0f;
-
-            // 2. تتبع ذروة الارتطام
-            uint32_t t = get_millis();
-            while ((get_millis() - t) < 500) {
-                if (readSensorsDetailed(&ax, &ay, &az, &totalA, &totalG)) {
-                    if (totalA > peakImpact) peakImpact = totalA;
-                }
-                vTaskDelay(pdMS_TO_TICKS(40));
-            }
-
-            // 3. حساب تغير زاوية الميلان (Tilt)
-            vTaskDelay(pdMS_TO_TICKS(150));
-            float post_ax = 0, post_ay = 0, post_az = 0;
-            readSensorsDetailed(&post_ax, &post_ay, &post_az, &totalA, &totalG);
-
-            float dot = (pre_ax * post_ax) + (pre_ay * post_ay) + (pre_az * post_az);
-            float m1 = sqrtf(pre_ax * pre_ax + pre_ay * pre_ay + pre_az * pre_az);
-            float m2 = sqrtf(post_ax * post_ax + post_ay * post_ay + post_az * post_az);
-            float cosTheta = dot / (m1 * m2);
-            if (cosTheta > 1.0f) cosTheta = 1.0f;
-            if (cosTheta < -1.0f) cosTheta = -1.0f;
-            float tiltAngle = acosf(cosTheta) * (180.0f / (float)M_PI);
-            if (isnan(tiltAngle)) tiltAngle = 0.0f;
-
-            // 4. فحص السكون اللاحق (Immobility)
-            float sum = 0.0f, readings[8];
-            for (int i = 0; i < 8; i++) {
-                readSensorsDetailed(&ax, &ay, &az, &totalA, &totalG);
-                readings[i] = totalA;
-                sum += totalA;
-                vTaskDelay(pdMS_TO_TICKS(80));
-            }
-            float mean = sum / 8.0f, varSum = 0.0f;
-            for (int i = 0; i < 8; i++) {
-                varSum += (readings[i] - mean) * (readings[i] - mean);
-            }
-            float immobilityVar = varSum / 8.0f;
-
-            // التحقق من الشروط بنفس العتبات الأصلية
-            bool passGyro   = (normGyro > 95.0f);
-            bool passImpact = (peakImpact > 1.85f);
-            bool passTilt   = (tiltAngle > 30.0f);
-            bool passStill  = (immobilityVar < 0.15f);
-
-            // طباعة سطر المقاييس باللون السماوي
+            // طباعة المقاييس المساعدة
             printf(C_CYAN "[METRICS] Gyro: %.1f dps | Impact: %.2fg | Tilt: %.1f deg | Stillness: %.4f\n" C_RESET,
-                   normGyro, peakImpact, tiltAngle, immobilityVar);
+                   metrics.norm_gyro_dps, metrics.peak_impact_g, metrics.tilt_angle_deg, metrics.immobility_var);
             fflush(stdout);
 
-            // النتيجة وتطبيق التجميد
-            if (passGyro && passImpact && passTilt && passStill) {
-                printf(C_RED ">>> [ALERT] FALL DETECTED! <<<\n");
-                
+            if (is_fall) {
+                printf(C_RED ">>> [ALERT] FALL CONFIRMED BY AI & HYBRID LOGIC! <<<\n" C_RESET);
                 fflush(stdout);
 
-                // تحديث حزمة الـ BLE
                 current_payload.status_flags |= FLAG_FALL_DETECTED;
                 current_payload.seq_num++;
                 update_ble_payload(&current_payload);
 
-                // تجميد 5 ثوانٍ
                 vTaskDelay(pdMS_TO_TICKS(5000));
 
                 current_payload.status_flags &= ~FLAG_FALL_DETECTED;
@@ -271,19 +136,16 @@ void fall_detection_task(void *param) {
                 fflush(stdout);
             }
 
-            putGyroToSleepWOM();
-
-            // نافذة تهدئة لمنع تشغيل المقاطعة بسبب ارتداد اليد
+            // فترة تهدئة لتجنب القراءات الارتدادية
             vTaskDelay(pdMS_TO_TICKS(350));
-            readRegister(0x3A);
             motionDetected = false;
         }
     }
 }
 
 void app_main(void) {
-    // كتم كل لوقات النظام والـ BLE
-    esp_log_level_set("*", ESP_LOG_NONE);
+    // تفعيل اللوق لرؤية نتائج Edge Impulse
+    esp_log_level_set("*", ESP_LOG_INFO);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -296,34 +158,16 @@ void app_main(void) {
     ble_hs_cfg.sync_cb = on_ble_sync;
     nimble_port_freertos_init(nimble_host_task);
 
-    // تهيئة I2C
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = MPU6050_SDA_PIN,
-        .scl_io_num = MPU6050_SCL_PIN,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 400000
-    };
-    i2c_param_config(I2C_PORT, &conf);
-    i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0);
+    // تهيئة محرك السقوط والحساس
+    fall_detector_init();
 
-    // تهيئة المقاطعة
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << MPU6050_INT_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_POSEDGE
-    };
-    gpio_config(&io_conf);
+    // ربط معالج المقاطعة بأمان
     gpio_install_isr_service(0);
-    gpio_isr_handler_add(MPU6050_INT_PIN, motion_isr, NULL);
-    esp_sleep_enable_ext0_wakeup(MPU6050_INT_PIN, 1);
+    gpio_isr_handler_add((gpio_num_t)MPU6050_INT_PIN, motion_isr, NULL);
 
     printf(C_CYAN "\n--- AeroMedic Wearable Engine Ready ---\n" C_RESET);
     fflush(stdout);
-    configureMPU6050_WOM();
 
-    xTaskCreate(fall_detection_task, "fall_task", 4096, NULL, 6, NULL);
+    // 8192 بايت لتفادي Stack Overflow أثناء تشغيل التنبؤ
+    xTaskCreate(fall_detection_task, "fall_task", 8192, NULL, 6, NULL);
 }
