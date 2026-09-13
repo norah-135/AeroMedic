@@ -1,4 +1,3 @@
-#define EI_CLASSIFIER_DISABLE_ESP_DSP 1
 #include "fall_detector.h"
 #include <cmath>
 #include <cstring>
@@ -17,6 +16,15 @@ static const char *TAG = "FALL_ENGINE";
 
 #define MPU_ADDR 0x68
 #define I2C_PORT I2C_NUM_0
+
+// مصفوفة لتغذية نموذج الذكاء الاصطناعي
+static float raw_features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+
+// دالة Callback لقراءة البيانات يطلبها محرك Edge Impulse
+static int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
+    memcpy(out_ptr, raw_features + offset, length * sizeof(float));
+    return 0;
+}
 
 // كتابة مسجل I2C
 static esp_err_t mpu_write_reg(uint8_t reg, uint8_t val) {
@@ -73,7 +81,6 @@ void fall_detector_arm_sleep(void) {
 }
 
 esp_err_t fall_detector_init(void) {
-    // تهيئة منفذ I2C بصياغة متوافقة تماماً مع C++
     i2c_config_t conf;
     memset(&conf, 0, sizeof(i2c_config_t));
     conf.mode = I2C_MODE_MASTER;
@@ -97,7 +104,7 @@ esp_err_t fall_detector_init(void) {
     
     fall_detector_arm_sleep();
 
-    // تجهيز بن المقاطعة للاستيقاظ الخارجي
+    // بن المقاطعة
     gpio_config_t io_conf;
     memset(&io_conf, 0, sizeof(gpio_config_t));
     io_conf.pin_bit_mask = (1ULL << MPU6050_INT_PIN);
@@ -109,7 +116,7 @@ esp_err_t fall_detector_init(void) {
     
     esp_sleep_enable_ext0_wakeup((gpio_num_t)MPU6050_INT_PIN, 1);
 
-    ESP_LOGI(TAG, "Fall Engine Initialized with WOM (Threshold = 10, Accel = 5Hz)");
+    ESP_LOGI(TAG, "Fall Engine Initialized. Model input size: %d samples", EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
     return ESP_OK;
 }
 
@@ -123,13 +130,20 @@ bool fall_detector_run_analysis(fall_metrics_t *metrics) {
     float weightedGyro = 0.0f, totalWeight = 0.0f;
     const float weights[5] = {2.5f, 2.2f, 1.8f, 1.4f, 1.0f};
 
-    // 1. الدوران المبكر
+    // 1. الدوران المبكر وملء جزء من الـ features
+    size_t feat_ix = 0;
     for (int i = 0; i < 5; i++) {
         if (read_sensors(&ax, &ay, &az, &totalA, &totalG)) {
             if (i == 0) { pre_ax = ax; pre_ay = ay; pre_az = az; }
             weightedGyro += (totalG * weights[i]);
             totalWeight += weights[i];
             if (totalA > peakImpact) peakImpact = totalA;
+
+            if (feat_ix + 2 < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
+                raw_features[feat_ix++] = ax;
+                raw_features[feat_ix++] = ay;
+                raw_features[feat_ix++] = az;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -140,6 +154,12 @@ bool fall_detector_run_analysis(fall_metrics_t *metrics) {
     while ((xTaskGetTickCount() - start_tick) < pdMS_TO_TICKS(500)) {
         if (read_sensors(&ax, &ay, &az, &totalA, &totalG)) {
             if (totalA > peakImpact) peakImpact = totalA;
+
+            if (feat_ix + 2 < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
+                raw_features[feat_ix++] = ax;
+                raw_features[feat_ix++] = ay;
+                raw_features[feat_ix++] = az;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(40));
     }
@@ -161,12 +181,19 @@ bool fall_detector_run_analysis(fall_metrics_t *metrics) {
     metrics->tilt_angle_deg = acosf(cosTheta) * (180.0f / (float)M_PI);
     if (std::isnan(metrics->tilt_angle_deg)) metrics->tilt_angle_deg = 0.0f;
 
-    // 4. فحص السكون (Immobility)
+    // 4. فحص السكون (Immobility) وإكمال بقية الـ Buffer
     float sum = 0.0f, readings[8];
     for (int i = 0; i < 8; i++) {
         read_sensors(&ax, &ay, &az, &totalA, &totalG);
         readings[i] = totalA;
         sum += totalA;
+
+        while (feat_ix + 2 < EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE && i == 7) {
+            raw_features[feat_ix++] = ax;
+            raw_features[feat_ix++] = ay;
+            raw_features[feat_ix++] = az;
+        }
+
         vTaskDelay(pdMS_TO_TICKS(80));
     }
     float mean = sum / 8.0f, varSum = 0.0f;
@@ -175,13 +202,33 @@ bool fall_detector_run_analysis(fall_metrics_t *metrics) {
     }
     metrics->immobility_var = varSum / 8.0f;
 
-    // فحص الشروط الهجينة
-    bool passGyro   = (metrics->norm_gyro_dps > 95.0f);
-    bool passImpact = (metrics->peak_impact_g > 1.85f);
-    bool passTilt   = (metrics->tilt_angle_deg > 30.0f);
-    bool passStill  = (metrics->immobility_var < 0.15f);
+    // 5. تشغيل استدلال Edge Impulse
+    bool ai_fall_detected = false;
+    signal_t features_signal;
+    features_signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+    features_signal.get_data = &raw_feature_get_data;
 
-    metrics->is_fall_confirmed = (passGyro && passImpact && passTilt && passStill);
+    ei_impulse_result_t result = { 0 };
+    EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, false);
+
+    if (res == EI_IMPULSE_OK) {
+        ESP_LOGI(TAG, "=== [AI Prediction Confidence] ===");
+        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+            ESP_LOGI(TAG, "  -> %s: %.1f%%", result.classification[ix].label, result.classification[ix].value * 100.0f);
+            // إذا كانت الفئة fall وثقتها أعلى من 60%
+            if (strstr(result.classification[ix].label, "fall") != NULL || strstr(result.classification[ix].label, "Fall") != NULL) {
+                if (result.classification[ix].value > 0.60f) {
+                    ai_fall_detected = true;
+                }
+            }
+        }
+    } else {
+        ESP_LOGE(TAG, "AI Inference failed with code: %d", res);
+    }
+
+    // الدمج الهجين: التحقق الفيزيائي + تصنيف الذكاء الاصطناعي
+    bool passImpact = (metrics->peak_impact_g > 1.85f);
+    metrics->is_fall_confirmed = ai_fall_detected || (passImpact && (metrics->tilt_angle_deg > 30.0f));
 
     fall_detector_arm_sleep();
     return metrics->is_fall_confirmed;

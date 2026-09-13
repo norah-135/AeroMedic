@@ -76,7 +76,7 @@
 #include "edge-impulse-sdk/dsp/dsp_engines/ei_arm_cmsis_dsp.h"
 #include "edge-impulse-sdk/dsp/dsp_engines/ei_cmsis_numpy.hpp"
 
-#elif EIDSP_USE_ESP_DSP
+#elif 0
 #include "edge-impulse-sdk/dsp/dsp_engines/ei_esp_dsp.h"
 
 #else

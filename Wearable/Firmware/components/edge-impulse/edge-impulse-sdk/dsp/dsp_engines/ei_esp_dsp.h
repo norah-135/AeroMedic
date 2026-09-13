@@ -1,6 +1,7 @@
 // ESP-DSP engine integration for Edge Impulse SDK
 // Copyright (c) 2025 Edge Impulse, Espressif Systems
 // Licensed under Apache 2.0
+#define EI_CLASSIFIER_DISABLE_ESP_DSP 1
 
 #ifndef EI_ESP_DSP_H
 #define EI_ESP_DSP_H
