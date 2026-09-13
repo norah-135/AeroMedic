@@ -97,7 +97,6 @@ void fall_detection_task(void *param) {
             printf(C_GRAY "[SLEEP] ESP32 in Light Sleep. Monitoring motion...\n" C_RESET);
             fflush(stdout);
             
-            // التأكد من تهيئة وضع سكون الحساس قبل نوم المعالج
             fall_detector_arm_sleep();
             esp_light_sleep_start();
         }
@@ -108,16 +107,14 @@ void fall_detection_task(void *param) {
             printf(C_YELLOW "\n[EVENT] Motion Trigger -> Invoking Edge Impulse Engine...\n" C_RESET);
             fflush(stdout);
 
-            // استدعاء التحليل الهجين واستدلال الذكاء الاصطناعي
             bool is_fall = fall_detector_run_analysis(&metrics);
 
-            // طباعة المقاييس المساعدة
             printf(C_CYAN "[METRICS] Gyro: %.1f dps | Impact: %.2fg | Tilt: %.1f deg | Stillness: %.4f\n" C_RESET,
                    metrics.norm_gyro_dps, metrics.peak_impact_g, metrics.tilt_angle_deg, metrics.immobility_var);
             fflush(stdout);
 
             if (is_fall) {
-                printf(C_RED ">>> [ALERT] FALL CONFIRMED BY AI & HYBRID LOGIC! <<<\n" C_RESET);
+                printf(C_RED "    [ALERT] FALL CONFIRMED    \n" C_RESET);
                 fflush(stdout);
 
                 current_payload.status_flags |= FLAG_FALL_DETECTED;
@@ -132,7 +129,7 @@ void fall_detection_task(void *param) {
                 printf(C_GREEN "[RESET] Resuming normal operation.\n\n" C_RESET);
                 fflush(stdout);
             } else {
-                printf(C_GREEN ">>> [DISMISSED] Normal Movement.\n\n" C_RESET);
+                printf(C_GREEN "    [DISMISSED] Normal Movement.\n\n" C_RESET);
                 fflush(stdout);
             }
 
