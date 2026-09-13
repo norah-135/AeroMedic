@@ -9,16 +9,15 @@ extern "C" {
 // ========================================================
 #define PIN_MAX30102_SDA          8    // Data -> GPIO8
 #define PIN_MAX30102_SCL          9    // Clock -> GPIO9
-#define PIN_MAX30102_INT          20    // Interrupt -> GPIO7
+#define PIN_MAX30102_INT          20   // Interrupt -> GPIO20
 #define MAX30102_I2C_ADDR         0x57 // Fixed I2C Address
 
 // ========================================================
-// 2. ICM-42688-P 6-Axis IMU (SPI Bus)
+// 2. MPU6050 6-Axis IMU (I2C Bus)
 // ========================================================
-#define PIN_ICM42688_MOSI         6    // Data In (AP_SDI) -> GPIO6
-#define PIN_ICM42688_SCLK         4    // Clock (AP_SCLK) -> GPIO4
-#define PIN_ICM42688_CS           10   // Chip Select (AP_CS) -> GPIO10
-#define PIN_ICM42688_INT          21   // Interrupt (INT1) -> GPIO21
+#define MPU6050_SDA_PIN           21
+#define MPU6050_SCL_PIN           22
+#define MPU6050_INT_PIN           4
 
 // ========================================================
 // 3. Semtech SX1262 LoRa Transceiver (SPI & Control Pins)
